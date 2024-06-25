@@ -1,78 +1,32 @@
 package eu.karim.jsaispastrop;
 
 import com.comphenix.protocol.wrappers.BlockPosition;
+import net.minecraft.server.v1_8_R3.Block;
+import net.minecraft.server.v1_8_R3.PacketPlayOutBlockChange;
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
-import org.bukkit.entity.Entity;
+import org.bukkit.craftbukkit.v1_8_R3.entity.CraftPlayer;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
+import org.bukkit.event.block.BlockFromToEvent;
 import org.bukkit.event.block.BlockPlaceEvent;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.util.Vector;
-
-import com.comphenix.protocol.PacketType;
-import com.comphenix.protocol.ProtocolLibrary;
-import com.comphenix.protocol.ProtocolManager;
-import com.comphenix.protocol.events.PacketAdapter;
-import com.comphenix.protocol.events.PacketEvent;
-import com.comphenix.protocol.wrappers.WrappedBlockData;
 
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.HashSet;
-import java.util.Objects;
 
-public class BlockEntityVisibilityManager implements Listener {
-    private final ProtocolManager protocolManager;
-    private final Map<UUID, String> playerGroups; // Store the group of each player
-    private final Map<String, Set<BlockData>> groupBlocks; // Store blocks placed by each group
-    private final Map<UUID, Set<UUID>> hiddenEntities; // Store hidden entities per player
+public class BlockEntityVisibilityManager extends JavaPlugin implements Listener {
+    private final Map<UUID, Set<Vector>> playerBlocks = new HashMap<>(); // Store blocks placed by each player
 
-    public BlockEntityVisibilityManager(JavaPlugin plugin) {
-        protocolManager = ProtocolLibrary.getProtocolManager();
-        playerGroups = new HashMap<>();
-        groupBlocks = new HashMap<>();
-        hiddenEntities = new HashMap<>();
-
-        Bukkit.getPluginManager().registerEvents(this, plugin);
-
-        for (Player player : Bukkit.getOnlinePlayers()) {
-            assignPlayerToGroup(player, "A");
-        }
-
-        protocolManager.addPacketListener(new PacketAdapter(plugin, PacketType.Play.Server.BLOCK_CHANGE) {
-            @Override
-            public void onPacketSending(PacketEvent event) {
-                Player player = event.getPlayer();
-                WrappedBlockData blockData = event.getPacket().getBlockData().read(0);
-                Material blockType = blockData.getType();
-                BlockPosition blockPosition = event.getPacket().getBlockPositionModifier().read(0);
-                BlockData blockLocation = new BlockData(blockPosition.toVector(), blockType);
-
-                // Hide water and lava placed by other groups
-                if (blockType == Material.WATER || blockType == Material.LAVA) {
-                    if (!isBlockPlacedByGroup(player, blockLocation)) {
-                        event.setCancelled(true);
-                    }
-                }
-            }
-        });
-
-        protocolManager.addPacketListener(new PacketAdapter(plugin, PacketType.Play.Server.SPAWN_ENTITY) {
-            @Override
-            public void onPacketSending(PacketEvent event) {
-                Player player = event.getPlayer();
-                Entity entity = event.getPacket().getEntityModifier(event).read(0);
-
-                // Hide entities placed by other groups
-                if (!isEntityVisibleToPlayer(player, entity)) {
-                    event.setCancelled(true);
-                }
-            }
-        });
+    @Override
+    public void onEnable() {
+        // Register event listener
+        Bukkit.getPluginManager().registerEvents(this, this);
     }
 
     @EventHandler
@@ -82,60 +36,77 @@ public class BlockEntityVisibilityManager implements Listener {
 
         // Track water and lava blocks placed by players
         if (blockType == Material.WATER || blockType == Material.LAVA) {
-            String group = playerGroups.get(player.getUniqueId());
-            groupBlocks.computeIfAbsent(group, k -> new HashSet<>()).add(new BlockData(event.getBlock().getLocation().toVector(), blockType));
+            UUID playerId = player.getUniqueId();
+            playerBlocks.computeIfAbsent(playerId, k -> new HashSet<>()).add(event.getBlock().getLocation().toVector());
+
+            // Hide the block for other players
+            hideBlockForOtherPlayers(player, event.getBlock().getLocation().toVector(), blockType);
         }
     }
 
-    private boolean isBlockPlacedByGroup(Player player, BlockData blockData) {
-        String group = playerGroups.get(player.getUniqueId());
-        Set<BlockData> blocks = groupBlocks.get(group);
-        return blocks != null && blocks.contains(blockData);
+    @EventHandler
+    public void onBlockFromTo(BlockFromToEvent event) {
+        Material blockType = event.getBlock().getType();
+
+        // Track flowing water and lava
+        if (blockType == Material.WATER || blockType == Material.LAVA) {
+            Vector from = event.getBlock().getLocation().toVector();
+            Vector to = event.getToBlock().getLocation().toVector();
+
+            // Hide the flowing block for other players
+            hideFlowingBlockForOtherPlayers(from, to, blockType);
+        }
     }
 
-    private boolean isEntityVisibleToPlayer(Player player, Entity entity) {
+    private void hideBlockForOtherPlayers(Player placingPlayer, Vector blockPosition, Material blockType) {
+        UUID placingPlayerId = placingPlayer.getUniqueId();
+
+        for (Player player : Bukkit.getOnlinePlayers()) {
+            UUID playerId = player.getUniqueId();
+
+            if (!placingPlayerId.equals(playerId)) {
+                sendBlockChange(player, blockPosition, Material.AIR);
+            }
+        }
+    }
+
+    private void hideFlowingBlockForOtherPlayers(Vector from, Vector to, Material blockType) {
+        for (Player player : Bukkit.getOnlinePlayers()) {
+            UUID playerId = player.getUniqueId();
+
+            // Hide the original block if not placed by this player
+            if (!isBlockPlacedByPlayer(playerId, from)) {
+                sendBlockChange(player, from, Material.AIR);
+            }
+
+            // Hide the flowing block if not placed by this player
+            if (!isBlockPlacedByPlayer(playerId, to)) {
+                sendBlockChange(player, to, Material.AIR);
+            }
+        }
+    }
+
+    private boolean isBlockPlacedByPlayer(UUID playerId, Vector blockPosition) {
+        Set<Vector> blocks = playerBlocks.get(playerId);
+        return blocks != null && blocks.contains(blockPosition);
+    }
+
+    private void sendBlockChange(Player player, Vector blockPosition, Material newMaterial) {
+        BlockPosition bp = new BlockPosition(blockPosition.getBlockX(), blockPosition.getBlockY(), blockPosition.getBlockZ());
+        Block newBlock = (Block) Block.getByCombinedId(newMaterial.getId());
+        PacketPlayOutBlockChange packet = new PacketPlayOutBlockChange();
+        packet.block = newBlock.getBlockData();
+
+        ((CraftPlayer) player).getHandle().playerConnection.sendPacket(packet);
+    }
+
+    public void addPlayerToGroup(Player player) {
         UUID playerId = player.getUniqueId();
-        Set<UUID> hiddenEntitiesForPlayer = hiddenEntities.get(playerId);
-        return hiddenEntitiesForPlayer == null || !hiddenEntitiesForPlayer.contains(entity.getUniqueId());
+        playerBlocks.computeIfAbsent(playerId, k -> new HashSet<>());
     }
 
-    public void hideEntityForPlayer(Player player, Entity entity) {
+    public void removePlayerFromGroup(Player player) {
         UUID playerId = player.getUniqueId();
-        hiddenEntities.computeIfAbsent(playerId, k -> new HashSet<>()).add(entity.getUniqueId());
-    }
-
-    public void showEntityForPlayer(Player player, Entity entity) {
-        UUID playerId = player.getUniqueId();
-        Set<UUID> hiddenEntitiesForPlayer = hiddenEntities.get(playerId);
-        if (hiddenEntitiesForPlayer != null) {
-            hiddenEntitiesForPlayer.remove(entity.getUniqueId());
-        }
-    }
-
-    public void assignPlayerToGroup(Player player, String group) {
-        playerGroups.put(player.getUniqueId(), group);
-    }
-
-    private static class BlockData {
-        private final Vector location;
-        private final Material type;
-
-        public BlockData(Vector location, Material type) {
-            this.location = location;
-            this.type = type;
-        }
-
-        @Override
-        public boolean equals(Object obj) {
-            if (this == obj) return true;
-            if (obj == null || getClass() != obj.getClass()) return false;
-            BlockData blockData = (BlockData) obj;
-            return location.equals(blockData.location) && type == blockData.type;
-        }
-
-        @Override
-        public int hashCode() {
-            return Objects.hash(location, type);
-        }
+        playerBlocks.remove(playerId);
     }
 }

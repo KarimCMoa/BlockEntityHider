@@ -9,7 +9,7 @@ public class Main extends JavaPlugin {
     @Override
     public void onEnable() {
         // Initialize the block and entity visibility manager
-        blockEntityVisibilityManager = new BlockEntityVisibilityManager(this);
+        blockEntityVisibilityManager = new BlockEntityVisibilityManager();
 
         //TODO Initialize the duel manager
         // duelManager = new DuelManager(blockEntityVisibilityManager);
